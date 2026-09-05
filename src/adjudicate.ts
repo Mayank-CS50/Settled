@@ -7,7 +7,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-import { z } from "zod";
+import * as z from "zod";
 import type { Netting } from "./match.ts";
 import { EXCEPTION_CODES, type Decision } from "./types.ts";
 
@@ -146,12 +146,15 @@ export async function adjudicate(
           needs_human: !trusted,
         };
       } catch (err) {
+        // Carry the real reason into the audit trail. A bare "unexpected error" once
+        // hid a client-side TypeError here for two full runs, which read exactly like
+        // a model failure — an opaque reason on a money path is its own bug.
         const why =
           err instanceof Anthropic.RateLimitError
             ? "rate limited"
             : err instanceof Anthropic.APIError
-              ? `API error ${err.status}`
-              : "unexpected error";
+              ? `API ${err.status}: ${String(err.message).slice(0, 120)}`
+              : `client error: ${err instanceof Error ? err.message : String(err)}`;
         return unreviewed(n, why);
       }
     }),
