@@ -7,6 +7,7 @@
 import { writeFileSync } from "node:fs";
 import type {
   BankRow,
+  PaymentTruthRow,
   Dataset,
   ExceptionCode,
   LedgerRow,
@@ -71,12 +72,26 @@ export function generate(utrCount = 220, seed = 42): Dataset {
   const settlements: SettlementRow[] = [];
   const bank: BankRow[] = [];
   const truth: TruthRow[] = [];
+  const payment_truth: PaymentTruthRow[] = [];
 
   for (let u = 0; u < utrCount; u++) {
     const utr = `UTR${String(700000 + u)}`;
     const code = pick(rand());
     const settledAt = addDays("2026-08-01", Math.floor(rand() * 28));
     const nPayments = 1 + Math.floor(rand() * 3);
+
+    // Payment-grain anomalies are injected only into UTRs that are clean at the
+    // payout grain. Keeping the two passes disjoint means each is measured on its
+    // own, rather than one pass's noise masking the other's failures.
+    const r = rand();
+    const payCode: ExceptionCode | null =
+      code !== null
+        ? null
+        : r < 0.1
+          ? "GROSS_MISMATCH"
+          : r < 0.2
+            ? "UNSETTLED_CAPTURE"
+            : null;
 
     let expectedNet: Paise = 0;
 
@@ -98,13 +113,25 @@ export function generate(utrCount = 220, seed = 42): Dataset {
       const net = gross - fee - gst - refund - chargeback;
       expectedNet += net;
 
+      // The books disagree with the PG about what was charged. The settlement report
+      // keeps the true figure, so the payout still reconciles — only Pass A sees this.
+      const ledgerGross =
+        payCode === "GROSS_MISMATCH" && p === 0
+          ? gross + 1100 + Math.floor(rand() * 4000)
+          : gross;
+
       ledger.push({
         order_id: `order_${u}_${p}`,
         payment_id,
-        gross_paise: gross,
+        gross_paise: ledgerGross,
         captured_at: addDays(settledAt, -2),
         status: chargeback > 0 ? "disputed" : refund > 0 ? "refunded" : "captured",
         refund_paise: refund,
+      });
+      payment_truth.push({
+        payment_id,
+        should_match: ledgerGross === gross,
+        exception_code: ledgerGross === gross ? null : "GROSS_MISMATCH",
       });
 
       settlements.push({
@@ -121,11 +148,39 @@ export function generate(utrCount = 220, seed = 42): Dataset {
       });
     }
 
-    // MISSING_IN_LEDGER: a bank credit with no settlement backing it at all.
+    // Money captured in the merchant's books that never reached any settlement.
+    // Nothing on the settlement or bank side changes, so this is invisible to Pass B —
+    // which is exactly why a two-source reconciliation would never surface it.
+    if (payCode === "UNSETTLED_CAPTURE") {
+      const orphan = `pay_${u}_orphan`;
+      ledger.push({
+        order_id: `order_${u}_orphan`,
+        payment_id: orphan,
+        gross_paise: 50000 + Math.floor(rand() * 400000),
+        captured_at: addDays(settledAt, -2),
+        status: "captured",
+        refund_paise: 0,
+      });
+      payment_truth.push({
+        payment_id: orphan,
+        should_match: false,
+        exception_code: "UNSETTLED_CAPTURE",
+      });
+    }
+
+    // MISSING_IN_LEDGER: a bank credit backed by nothing on either book — money in
+    // that the merchant cannot attribute. Drop both the ledger and settlement rows;
+    // keep the bank credit.
     if (code === "MISSING_IN_LEDGER") {
-      // Drop the settlement rows we just wrote for this UTR; keep the bank credit.
       for (let i = settlements.length - 1; i >= 0; i--) {
         if (settlements[i]!.utr === utr) settlements.splice(i, 1);
+      }
+      for (let i = ledger.length - 1; i >= 0; i--) {
+        if (ledger[i]!.payment_id.startsWith(`pay_${u}_`)) ledger.splice(i, 1);
+      }
+      for (let i = payment_truth.length - 1; i >= 0; i--) {
+        if (payment_truth[i]!.payment_id.startsWith(`pay_${u}_`))
+          payment_truth.splice(i, 1);
       }
     }
 
@@ -164,7 +219,7 @@ export function generate(utrCount = 220, seed = 42): Dataset {
     });
   }
 
-  return { ledger, settlements, bank, truth };
+  return { ledger, settlements, bank, truth, payment_truth };
 }
 
 const toCsv = (rows: Record<string, unknown>[]): string => {
@@ -182,6 +237,7 @@ if (import.meta.filename === process.argv[1]) {
   writeFileSync("data/settlements.csv", toCsv(d.settlements as never));
   writeFileSync("data/bank.csv", toCsv(d.bank as never));
   writeFileSync("data/truth.json", JSON.stringify(d.truth, null, 2));
+  writeFileSync("data/payment-truth.json", JSON.stringify(d.payment_truth, null, 2));
   console.log(
     `generated: ${d.ledger.length} ledger · ${d.settlements.length} settlement · ${d.bank.length} bank · ${d.truth.length} UTRs`,
   );

@@ -3,9 +3,13 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { adjudicate } from "./adjudicate.ts";
-import { loadSources, matchDeterministic } from "./match.ts";
-import { render, score } from "./report.ts";
-import type { Decision, TruthRow } from "./types.ts";
+import {
+  loadSources,
+  matchDeterministic,
+  matchLedgerToSettlement,
+} from "./match.ts";
+import { render, renderPayments, score, scorePayments } from "./report.ts";
+import type { Decision, PaymentTruthRow, TruthRow } from "./types.ts";
 
 if (!existsSync("data/bank.csv")) {
   console.error("No data found. Run:  npm run generate");
@@ -15,6 +19,7 @@ if (!existsSync("data/bank.csv")) {
 const started = performance.now();
 
 const { ledger, settlements, bank } = loadSources();
+const paymentDecisions = matchLedgerToSettlement(ledger, settlements);
 const { decisions: deterministic, residuals } = matchDeterministic(
   settlements,
   bank,
@@ -37,7 +42,13 @@ const card = score(decisions, truth, {
   outputTokens: run.output_tokens,
 });
 
+const payTruth: PaymentTruthRow[] = JSON.parse(
+  readFileSync("data/payment-truth.json", "utf8"),
+);
+const payCard = scorePayments(paymentDecisions, payTruth);
+
 console.log(render(card, decisions));
+console.log(renderPayments(payCard));
 
 // Append-only audit trail: every decision, its tier, and why. This is the artefact
 // a finance team actually needs — the match rate is just its summary.
@@ -48,5 +59,8 @@ writeFileSync(
     .map((d) => JSON.stringify(d))
     .join("\n"),
 );
-writeFileSync("data/scorecard.json", JSON.stringify(card, null, 2));
+writeFileSync(
+  "data/scorecard.json",
+  JSON.stringify({ pass_b_utr: card, pass_a_payment: payCard }, null, 2),
+);
 console.log("  audit trail → data/audit.jsonl · scorecard → data/scorecard.json\n");

@@ -10,12 +10,32 @@ Three systems disagree about the same money, and none of them is wrong:
 | Settlement report | one row per payment, grouped by UTR | what Razorpay will pay out (net, after fees) |
 | Bank statement | one row per UTR | what actually arrived |
 
-The reconciliation unit is therefore **the UTR**, not the payment — a single bank credit
-covers many payments, and the netting happens at the payout level. Getting this grain
-wrong is the most common structural mistake in reconciliation code; matching payment-to-
-credit one-to-one cannot work, because those cardinalities never line up.
+These do not share a grain, so they cannot reconcile in one step. Matching payment-to-
+credit one-to-one cannot work — a single bank credit covers many payments, and the
+netting happens at the payout level. Getting this wrong is the most common structural
+mistake in reconciliation code.
 
-## Flow
+The system therefore runs **two passes at two grains**:
+
+| Pass | Sources | Grain | Question |
+|---|---|---|---|
+| **A** | ledger ↔ settlement | per payment | Did the PG agree to pay for this, at the right amount? |
+| **B** | settlement ↔ bank | per UTR | Did the netted payout arrive? |
+
+Each pass carries its own ground truth and its own confusion matrix, so neither can
+mask the other. Payment-grain anomalies are injected only into UTRs that are clean at
+the payout grain, keeping the two independently measurable.
+
+**Pass A is not decorative.** A capture that never enters a settlement leaves the
+settlement and bank sides agreeing perfectly — neither has heard of it — so Pass B
+reports a clean payout. Only the ledger knows the money was taken. `test.ts` asserts
+exactly this: the UTR reads matched while the payment reads unmatched.
+
+## Flow — Pass B (UTR grain)
+
+Pass A is a single payment-id join: absent from settlements → `UNSETTLED_CAPTURE`
+(exposure = full gross); gross disagreement → `GROSS_MISMATCH` (exposure = the
+difference); otherwise agreed. Pass B is where the netting model lives:
 
 ```
   ledger.csv      settlements.csv      bank.csv
@@ -77,6 +97,8 @@ overcharge, which is the single most valuable thing this system finds.
 | `MISSING_IN_LEDGER` | full `credit` (unattributed money in) |
 | `PARTIAL_SETTLEMENT` | `expected_net − credit` (the shortfall) |
 | `DUPLICATE_UTR` | `credit − expected_net` (the excess) |
+| `UNSETTLED_CAPTURE` | full ledger `gross` (captured, never paid out) |
+| `GROSS_MISMATCH` | absolute difference between ledger and settlement gross |
 | explained/matched | ₹0 |
 
 **The LLM is last, and it is bounded.** Tier 2 receives pre-computed figures, not raw
@@ -112,7 +134,7 @@ exception it carries. `score()` computes a confusion matrix against that, so:
 - **code accuracy** — did we assign the *right* exception, not merely flag one
 - **false-positive exposure** — the rupee cost of being wrong in the dangerous direction
 
-An engine that matched everything would score 74.5% "match rate" and be catastrophically
+An engine that matched everything would score 78.6% "match rate" and be catastrophically
 wrong. Precision is what catches that, and it is why the match rate is reported next to
 it rather than alone.
 
@@ -121,7 +143,8 @@ it rather than alone.
 1. **Real rate cards.** Per-method, per-tenure fee rates instead of a flat 2% — the fee
    integrity check is only as good as the rate it compares against.
 2. **Adversarial testing of Tier 2.** The deterministic tiers are well covered; the LLM
-   path sees ~6 UTRs per run. It needs a dedicated eval set of ambiguous residuals.
+   path sees ~7 UTRs per run and has never run against the live API. It needs a dedicated
+   eval set of ambiguous residuals.
 3. **Recovery actions.** Detection is closed; the loop is not. `MISSING_IN_BANK` and
    `PARTIAL_SETTLEMENT` should open a support ticket with the evidence attached.
 4. **Streaming ingestion.** Currently batch over CSV. Real settlement data arrives daily

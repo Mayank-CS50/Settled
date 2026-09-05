@@ -5,13 +5,15 @@
 
 import assert from "node:assert/strict";
 import { generate } from "./generate.ts";
-import { matchDeterministic } from "./match.ts";
-import { score } from "./report.ts";
+import { matchDeterministic, matchLedgerToSettlement } from "./match.ts";
+import { score, scorePayments } from "./report.ts";
 
 const d = generate(220, 42);
 const { decisions, residuals } = matchDeterministic(d.settlements, d.bank);
 const byUtr = new Map(decisions.map((x) => [x.utr, x]));
 const truthByUtr = new Map(d.truth.map((t) => [t.utr, t]));
+const payDecisions = matchLedgerToSettlement(d.ledger, d.settlements);
+const payByend = new Map(payDecisions.map((x) => [x.payment_id, x]));
 
 let passed = 0;
 const check = (name: string, fn: () => void) => {
@@ -108,6 +110,46 @@ check("the deterministic tiers produce zero false positives", () => {
   });
   assert.equal(s.fp, 0, "a false positive silently writes off real money");
   assert.equal(s.fp_exposure_paise, 0);
+});
+
+check("Pass A: every ledger payment gets a decision", () => {
+  assert.equal(payDecisions.length, d.ledger.length);
+  assert.equal(
+    new Set(payDecisions.map((x) => x.payment_id)).size,
+    payDecisions.length,
+  );
+});
+
+check("Pass A: a capture that never reaches a settlement is caught", () => {
+  const orphans = d.payment_truth.filter(
+    (t) => t.exception_code === "UNSETTLED_CAPTURE",
+  );
+  assert.ok(orphans.length > 0, "generator produced no unsettled captures");
+  for (const t of orphans) {
+    const dec = payByend.get(t.payment_id)!;
+    assert.equal(dec.exception_code, "UNSETTLED_CAPTURE", `${t.payment_id} missed`);
+    assert.equal(dec.matched, false);
+    assert.ok(dec.exposure_paise > 0, "unsettled money must carry exposure");
+  }
+});
+
+check("Pass A finds what Pass B structurally cannot", () => {
+  // An unsettled capture touches neither the settlement report nor the bank, so the
+  // UTR-grain pass sees a perfectly clean payout. This is the whole reason the third
+  // source has to be reconciled rather than merely loaded.
+  const orphan = d.payment_truth.find(
+    (t) => t.exception_code === "UNSETTLED_CAPTURE",
+  )!;
+  const u = orphan.payment_id.split("_")[1];
+  const utrDecision = byUtr.get(`UTR${700000 + Number(u)}`)!;
+  assert.equal(utrDecision.matched, true, "Pass B should see nothing wrong");
+  assert.equal(payByend.get(orphan.payment_id)!.matched, false, "Pass A must catch it");
+});
+
+check("Pass A produces zero false positives", () => {
+  const s = scorePayments(payDecisions, d.payment_truth);
+  assert.equal(s.fp, 0, "a false agreement hides captured money that was never paid");
+  assert.equal(s.recall, 1);
 });
 
 check("results are reproducible across runs", () => {

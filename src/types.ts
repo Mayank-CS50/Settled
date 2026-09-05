@@ -36,6 +36,10 @@ export interface BankRow {
 }
 
 export const EXCEPTION_CODES = [
+  // Payment-grain: ledger vs settlement report
+  "UNSETTLED_CAPTURE",
+  "GROSS_MISMATCH",
+  // UTR-grain: settlement report vs bank
   "FEE_GST_VARIANCE",
   "TIMING_T_PLUS_N",
   "PARTIAL_SETTLEMENT",
@@ -71,9 +75,27 @@ export interface Decision {
   needs_human: boolean;
 }
 
+/**
+ * Pass A decision — payment grain. Asks "did the books and the PG agree about this
+ * payment at all", which is a different question from "did the payout arrive".
+ */
+export interface PaymentDecision {
+  payment_id: string;
+  matched: boolean;
+  exception_code: ExceptionCode | null;
+  exposure_paise: Paise;
+  reason: string;
+}
+
 /** Ground truth emitted by the generator. This is what makes real precision/recall possible. */
 export interface TruthRow {
   utr: string;
+  should_match: boolean;
+  exception_code: ExceptionCode | null;
+}
+
+export interface PaymentTruthRow {
+  payment_id: string;
   should_match: boolean;
   exception_code: ExceptionCode | null;
 }
@@ -83,4 +105,5 @@ export interface Dataset {
   settlements: SettlementRow[];
   bank: BankRow[];
   truth: TruthRow[];
+  payment_truth: PaymentTruthRow[];
 }

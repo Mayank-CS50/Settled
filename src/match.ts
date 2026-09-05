@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import type {
   BankRow,
   Decision,
+  PaymentDecision,
   LedgerRow,
   Paise,
   SettlementRow,
@@ -59,6 +60,54 @@ const groupBy = <T>(rows: T[], key: (r: T) => string): Map<string, T[]> => {
 
 const dayDiff = (a: string, b: string): number =>
   Math.round((Date.parse(a) - Date.parse(b)) / 86400000);
+
+/**
+ * PASS A — ledger vs settlement report, at PAYMENT grain.
+ *
+ * A different question from Pass B, and a different grain. Pass B asks "did the
+ * payout arrive"; Pass A asks "did the PG ever agree to pay for this at all, and for
+ * the right amount". A payment captured in the books that never enters a settlement
+ * is invisible to Pass B — the settlement and bank sides agree perfectly with each
+ * other, because neither has ever heard of it.
+ */
+export function matchLedgerToSettlement(
+  ledger: LedgerRow[],
+  settlements: SettlementRow[],
+): PaymentDecision[] {
+  const byPaymentId = new Map(settlements.map((s) => [s.payment_id, s]));
+
+  return ledger.map((l): PaymentDecision => {
+    const s = byPaymentId.get(l.payment_id);
+
+    if (!s) {
+      return {
+        payment_id: l.payment_id,
+        matched: false,
+        exception_code: "UNSETTLED_CAPTURE",
+        exposure_paise: l.gross_paise,
+        reason: `Captured ${rupees(l.gross_paise)} on ${l.captured_at}, never appeared in any settlement.`,
+      };
+    }
+
+    if (l.gross_paise !== s.gross_paise) {
+      return {
+        payment_id: l.payment_id,
+        matched: false,
+        exception_code: "GROSS_MISMATCH",
+        exposure_paise: Math.abs(l.gross_paise - s.gross_paise),
+        reason: `Books say ${rupees(l.gross_paise)}, settlement says ${rupees(s.gross_paise)} — differ by ${rupees(Math.abs(l.gross_paise - s.gross_paise))}.`,
+      };
+    }
+
+    return {
+      payment_id: l.payment_id,
+      matched: true,
+      exception_code: null,
+      exposure_paise: 0,
+      reason: `Agreed at ${rupees(l.gross_paise)}.`,
+    };
+  });
+}
 
 /** What the settlement report says should land in the bank, and why. */
 export interface Netting {

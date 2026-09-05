@@ -4,7 +4,13 @@
 // scores 100%. Because the generator emits ground truth, we can report precision
 // and recall, and price the false positives in rupees.
 
-import type { Decision, ExceptionCode, TruthRow } from "./types.ts";
+import type {
+  Decision,
+  ExceptionCode,
+  PaymentDecision,
+  PaymentTruthRow,
+  TruthRow,
+} from "./types.ts";
 
 // Claude Opus 5 list pricing, USD per million tokens.
 const USD_PER_MTOK_IN = 5.0;
@@ -110,8 +116,93 @@ export function score(
   };
 }
 
+export interface PaymentScorecard {
+  payments: number;
+  agree_rate: number;
+  precision: number;
+  recall: number;
+  code_accuracy: number;
+  tp: number;
+  fp: number;
+  tn: number;
+  fn: number;
+  exposure_paise: number;
+  by_code: Record<string, { count: number; exposure_paise: number }>;
+}
+
+/** Pass A scoring — payment grain, its own confusion matrix. */
+export function scorePayments(
+  decisions: PaymentDecision[],
+  truth: PaymentTruthRow[],
+): PaymentScorecard {
+  const truthById = new Map(truth.map((t) => [t.payment_id, t]));
+  let tp = 0,
+    fp = 0,
+    tn = 0,
+    fn = 0,
+    codeHits = 0,
+    codeTotal = 0,
+    exposure = 0;
+  const by_code: Record<string, { count: number; exposure_paise: number }> = {};
+
+  for (const d of decisions) {
+    const t = truthById.get(d.payment_id);
+    if (!t) continue;
+
+    if (d.matched && t.should_match) tp++;
+    else if (d.matched && !t.should_match) fp++;
+    else if (!d.matched && !t.should_match) tn++;
+    else fn++;
+
+    if (t.exception_code !== null) {
+      codeTotal++;
+      if (d.exception_code === t.exception_code) codeHits++;
+    }
+    if (!d.matched && d.exception_code) {
+      const b = (by_code[d.exception_code] ??= { count: 0, exposure_paise: 0 });
+      b.count++;
+      b.exposure_paise += d.exposure_paise;
+      exposure += d.exposure_paise;
+    }
+  }
+
+  return {
+    payments: decisions.length,
+    agree_rate: decisions.filter((d) => d.matched).length / decisions.length,
+    precision: tp + fp === 0 ? 1 : tp / (tp + fp),
+    recall: tp + fn === 0 ? 1 : tp / (tp + fn),
+    code_accuracy: codeTotal === 0 ? 1 : codeHits / codeTotal,
+    tp,
+    fp,
+    tn,
+    fn,
+    exposure_paise: exposure,
+    by_code,
+  };
+}
+
 const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
 const rupees = (p: number): string => `₹${(p / 100).toFixed(2)}`;
+
+export function renderPayments(s: PaymentScorecard): string {
+  const L: string[] = [];
+  L.push("  PASS A — ledger vs settlement report (payment grain)");
+  L.push("  " + "─".repeat(62));
+  L.push(`    ${s.payments} payments   agreement ${pct(s.agree_rate)}`);
+  L.push(
+    `    precision ${pct(s.precision)}  ·  recall ${pct(s.recall)}  ·  code acc. ${pct(s.code_accuracy)}`,
+  );
+  L.push(`    TP ${s.tp} · FP ${s.fp} · TN ${s.tn} · FN ${s.fn}`);
+  for (const [code, b] of Object.entries(s.by_code).sort(
+    (a, b) => b[1].count - a[1].count,
+  ))
+    L.push(`    ${code.padEnd(20)} ×${b.count}   exposure ${rupees(b.exposure_paise)}`);
+  L.push(
+    `    money captured but never settled or agreed: ${rupees(s.exposure_paise)}`,
+  );
+  L.push("");
+  return L.join("\n");
+}
 
 export function render(s: Scorecard, decisions: Decision[]): string {
   const L: string[] = [];
