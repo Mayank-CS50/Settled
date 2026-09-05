@@ -52,11 +52,11 @@ model call.
 |---|---|---|---|
 | **T0 — exact** | UTR join, credit equals expected net | 58.6% | ₹0 |
 | **T1 — netting** | fee/GST/refund/chargeback model, T+N window, structural checks | 38.2% | ₹0 |
-| **T2 — LLM** | Claude adjudicates the ambiguous remainder, structured verdict | 3.2% | metered |
+| **T2 — LLM** | Gemini adjudicates the ambiguous remainder, structured verdict | 3.2% | free tier |
 
-That ratio is the design. An architecture that sent all 220 UTRs to a model would cost
-~37× more, run ~1000× slower, and reconcile *worse* — because arithmetic that must be
-exact should not be delegated to a probabilistic system.
+That ratio is the design. An architecture that sent all 220 UTRs to a model would run
+orders of magnitude slower, cost ~31× more per token, and reconcile *worse* — because
+arithmetic that must be exact should not be delegated to a probabilistic system.
 
 ## Results
 
@@ -122,7 +122,8 @@ npm test             # 14 assertions across both passes
 
 Node ≥ 22.6. No build step — TypeScript runs directly via `--experimental-strip-types`.
 
-Tier 2 needs `ANTHROPIC_API_KEY`. **Without it the pipeline still completes**: every
+Tier 2 needs `GEMINI_API_KEY` (free from [AI Studio](https://aistudio.google.com/apikey);
+pin a different model with `GEMINI_MODEL`). **Without it the pipeline still completes**: every
 residual lands on the review queue marked `needs_human`, and nothing is falsely
 reconciled. An unreachable model must never look like a clean reconciliation.
 
@@ -141,6 +142,9 @@ Outputs land in `data/audit.jsonl` (one JSON decision per line, append-only) and
   not for a live bank export with quoted fields.
 - **One currency, one settlement cycle.** No multi-currency, no international
   settlement, no per-method rate cards.
+- **Tier 2 runs on the Gemini free tier, where Google may use prompts and outputs to
+  improve their models.** Acceptable here because every record is synthetic — there is
+  no merchant data to leak. A real deployment needs a paid tier or a self-hosted model.
 
 ## Layout
 
@@ -148,7 +152,7 @@ Outputs land in `data/audit.jsonl` (one JSON decision per line, append-only) and
 src/types.ts        money as integer paise; the decision record
 src/generate.ts     three synthetic sources + ground truth (seeded)
 src/match.ts        Pass A (payment grain) + Pass B Tiers 0/1 — the netting model
-src/adjudicate.ts   Tier 2 — Claude, structured output, confidence-gated
+src/adjudicate.ts   Tier 2 — Gemini, constrained decoding, confidence-gated
 src/report.ts       scoring against truth + the exception queue
 src/run.ts          pipeline entry point
 src/test.ts         self-check, 14 assertions

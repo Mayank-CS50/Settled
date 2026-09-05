@@ -4,25 +4,47 @@
 // the overwhelming majority at zero marginal cost. What is left is genuinely
 // ambiguous: a small gap that could be a rounding artifact, an unbilled charge, or
 // real leakage. That judgment is worth a model call. Nothing else here is.
+//
+// Provider: Google Gemini via AI Studio. The tier is provider-agnostic by design —
+// it consumes a Netting and returns a Decision, so swapping the model behind it
+// touches only this file.
 
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+import { GoogleGenAI, Type } from "@google/genai";
 import * as z from "zod";
 import type { Netting } from "./match.ts";
 import { EXCEPTION_CODES, type Decision } from "./types.ts";
 
-const MODEL = "claude-opus-5";
+/** Flash models are the free-tier eligible family; override to pin a different one. */
+const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
 
+/** Constrained decoding — the model cannot return a shape we did not ask for. */
+const RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    matched: {
+      type: Type.BOOLEAN,
+      description: "True only if the gap is fully explained and no money is missing.",
+    },
+    exception_code: {
+      type: Type.STRING,
+      enum: [...EXCEPTION_CODES],
+      description: "The single code that best characterises this residual.",
+    },
+    reason: {
+      type: Type.STRING,
+      description: "One sentence a finance analyst can act on. Cite the amounts.",
+    },
+    confidence: { type: Type.NUMBER, description: "0 to 1." },
+  },
+  required: ["matched", "exception_code", "reason", "confidence"],
+};
+
+// Validated again on our side. Constrained decoding is a strong guarantee, not a
+// total one, and this value decides whether money gets written off.
 const Verdict = z.object({
-  matched: z
-    .boolean()
-    .describe("True only if the gap is fully explained and no money is missing."),
-  exception_code: z
-    .enum(EXCEPTION_CODES)
-    .describe("The single code that best characterises this residual."),
-  reason: z
-    .string()
-    .describe("One sentence a finance analyst can act on. Cite the amounts."),
+  matched: z.boolean(),
+  exception_code: z.enum(EXCEPTION_CODES),
+  reason: z.string(),
   confidence: z.number().min(0).max(1),
 });
 
@@ -59,7 +81,7 @@ Settlement lag        : T+${n.lag_days}
 Classify this residual.`;
 }
 
-/** Marks a residual for human review without calling the API. */
+/** Marks a residual for human review without a usable model verdict. */
 const unreviewed = (n: Netting, why: string): Decision => ({
   utr: n.utr,
   matched: false,
@@ -77,6 +99,7 @@ export interface AdjudicationRun {
   llm_calls: number;
   input_tokens: number;
   output_tokens: number;
+  model: string;
 }
 
 export async function adjudicate(
@@ -84,81 +107,81 @@ export async function adjudicate(
   opts: { minConfidence?: number } = {},
 ): Promise<AdjudicationRun> {
   const minConfidence = opts.minConfidence ?? 0.75;
+  const empty = { llm_calls: 0, input_tokens: 0, output_tokens: 0, model: MODEL };
 
-  if (residuals.length === 0)
-    return { decisions: [], llm_calls: 0, input_tokens: 0, output_tokens: 0 };
+  if (residuals.length === 0) return { decisions: [], ...empty };
 
   // Degrade gracefully: without credentials the pipeline still completes and every
   // residual lands on the review queue. An unreachable model must never look like a
   // clean reconciliation.
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+  const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+  if (!apiKey) {
     return {
       decisions: residuals.map((n) => unreviewed(n, "no API credentials")),
-      llm_calls: 0,
-      input_tokens: 0,
-      output_tokens: 0,
+      ...empty,
     };
   }
 
-  const client = new Anthropic();
+  const ai = new GoogleGenAI({ apiKey });
+  const decisions: Decision[] = [];
   let input_tokens = 0;
   let output_tokens = 0;
   let llm_calls = 0;
 
-  const settled = await Promise.all(
-    residuals.map(async (n): Promise<Decision> => {
-      try {
-        const res = await client.messages.parse({
-          model: MODEL,
-          max_tokens: 4000,
-          system: SYSTEM,
-          thinking: { type: "adaptive" },
-          output_config: {
-            effort: "medium", // narrow classification over pre-computed figures
-            format: zodOutputFormat(Verdict),
-          },
-          messages: [{ role: "user", content: prompt(n) }],
-        });
+  // Sequential on purpose: the free tier allows ~10 requests/minute, and a burst of
+  // parallel calls trips it. At single-digit residual counts there is nothing to gain
+  // from concurrency.
+  for (const n of residuals) {
+    try {
+      const res = await ai.models.generateContent({
+        model: MODEL,
+        contents: prompt(n),
+        config: {
+          systemInstruction: SYSTEM,
+          responseMimeType: "application/json",
+          responseSchema: RESPONSE_SCHEMA,
+          temperature: 0, // a reconciliation verdict should not vary run to run
+        },
+      });
 
-        llm_calls++;
-        input_tokens += res.usage.input_tokens;
-        output_tokens += res.usage.output_tokens;
+      llm_calls++;
+      input_tokens += res.usageMetadata?.promptTokenCount ?? 0;
+      output_tokens += res.usageMetadata?.candidatesTokenCount ?? 0;
 
-        const v = res.parsed_output;
-        if (!v) return unreviewed(n, "model returned unparseable output");
-
-        // Gate on confidence: a low-confidence "matched" is not a match, it is a
-        // guess about money. Bound it and escalate.
-        const trusted = v.matched && v.confidence >= minConfidence;
-        return {
-          utr: n.utr,
-          matched: trusted,
-          exception_code: v.exception_code,
-          tier: "T2_LLM",
-          delta_paise: n.delta,
-          // A residual we accept is written off; one we hold is still at risk.
-          exposure_paise: trusted ? 0 : Math.abs(n.delta),
-          reason:
-            v.matched && !trusted
-              ? `${v.reason} [held: confidence ${v.confidence.toFixed(2)} < ${minConfidence}]`
-              : v.reason,
-          confidence: v.confidence,
-          needs_human: !trusted,
-        };
-      } catch (err) {
-        // Carry the real reason into the audit trail. A bare "unexpected error" once
-        // hid a client-side TypeError here for two full runs, which read exactly like
-        // a model failure — an opaque reason on a money path is its own bug.
-        const why =
-          err instanceof Anthropic.RateLimitError
-            ? "rate limited"
-            : err instanceof Anthropic.APIError
-              ? `API ${err.status}: ${String(err.message).slice(0, 120)}`
-              : `client error: ${err instanceof Error ? err.message : String(err)}`;
-        return unreviewed(n, why);
+      const parsed = Verdict.safeParse(JSON.parse(res.text ?? ""));
+      if (!parsed.success) {
+        decisions.push(unreviewed(n, "model returned an invalid verdict"));
+        continue;
       }
-    }),
-  );
+      const v = parsed.data;
 
-  return { decisions: settled, llm_calls, input_tokens, output_tokens };
+      // Gate on confidence: a low-confidence "matched" is not a match, it is a
+      // guess about money. Bound it and escalate.
+      const trusted = v.matched && v.confidence >= minConfidence;
+      decisions.push({
+        utr: n.utr,
+        matched: trusted,
+        exception_code: v.exception_code,
+        tier: "T2_LLM",
+        delta_paise: n.delta,
+        // A residual we accept is written off; one we hold is still at risk.
+        exposure_paise: trusted ? 0 : Math.abs(n.delta),
+        reason:
+          v.matched && !trusted
+            ? `${v.reason} [held: confidence ${v.confidence.toFixed(2)} < ${minConfidence}]`
+            : v.reason,
+        confidence: v.confidence,
+        needs_human: !trusted,
+      });
+    } catch (err) {
+      // Carry the real reason into the audit trail. A bare "unexpected error" once
+      // hid a client-side type error here for two full runs, which read exactly like
+      // a model failure — an opaque reason on a money path is its own bug.
+      decisions.push(
+        unreviewed(n, err instanceof Error ? err.message.slice(0, 140) : String(err)),
+      );
+    }
+  }
+
+  return { decisions, llm_calls, input_tokens, output_tokens, model: MODEL };
 }

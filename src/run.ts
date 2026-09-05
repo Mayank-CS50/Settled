@@ -40,6 +40,7 @@ const card = score(decisions, truth, {
   llmCalls: run.llm_calls,
   inputTokens: run.input_tokens,
   outputTokens: run.output_tokens,
+  model: run.model,
 });
 
 const payTruth: PaymentTruthRow[] = JSON.parse(

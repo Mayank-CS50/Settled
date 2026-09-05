@@ -9,7 +9,7 @@
     "test": "node --experimental-strip-types --no-warnings src/test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.124.0",
+    "@google/genai": "^2.21.0",
     "zod": "^4.5.4"
   },
   "engines": {

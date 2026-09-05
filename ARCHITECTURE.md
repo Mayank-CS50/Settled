@@ -64,8 +64,8 @@ difference); otherwise agreed. Pass B is where the netting model lives:
    └─────────────────────────────────────────────┘
                  │
                  ▼
-        Claude (claude-opus-5, effort: medium)
-        structured verdict, confidence-gated at 0.75
+      Gemini Flash — temperature 0, constrained decoding
+      structured verdict, confidence-gated at 0.75
                  │
                  ▼
      scorecard.json  ·  audit.jsonl (append-only)
@@ -104,7 +104,13 @@ overcharge, which is the single most valuable thing this system finds.
 **The LLM is last, and it is bounded.** Tier 2 receives pre-computed figures, not raw
 CSVs — the arithmetic is already done, so the model is asked for judgment, not
 calculation. It returns a typed verdict (`matched`, `exception_code`, `reason`,
-`confidence`) via structured outputs, never free text. A `matched` verdict below 0.75
+`confidence`) via constrained decoding, never free text, and that verdict is validated
+against a zod schema on our side as well — schema-constrained decoding is a strong
+guarantee, not a total one, and this value decides whether money is written off.
+
+**The provider is swappable.** Tier 2 consumes a `Netting` and returns a `Decision`,
+so the model behind it is confined to one file. It moved from Anthropic to Gemini
+during the build without touching either pass. A `matched` verdict below 0.75
 confidence is downgraded to `needs_human`: a low-confidence match is a guess about
 money.
 

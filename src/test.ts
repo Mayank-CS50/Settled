@@ -107,6 +107,7 @@ check("the deterministic tiers produce zero false positives", () => {
     llmCalls: 0,
     inputTokens: 0,
     outputTokens: 0,
+    model: "test",
   });
   assert.equal(s.fp, 0, "a false positive silently writes off real money");
   assert.equal(s.fp_exposure_paise, 0);

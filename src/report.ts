@@ -12,9 +12,11 @@ import type {
   TruthRow,
 } from "./types.ts";
 
-// Claude Opus 5 list pricing, USD per million tokens.
-const USD_PER_MTOK_IN = 5.0;
-const USD_PER_MTOK_OUT = 25.0;
+// Gemini Flash runs on the AI Studio free tier, so marginal cost is zero. Set these
+// to your published per-million rates if you move to a paid tier and want a real
+// projection; inventing rates we have not verified would make the number a lie.
+const USD_PER_MTOK_IN = Number(process.env.LLM_USD_PER_MTOK_IN ?? 0);
+const USD_PER_MTOK_OUT = Number(process.env.LLM_USD_PER_MTOK_OUT ?? 0);
 
 export interface Scorecard {
   utrs: number;
@@ -36,6 +38,9 @@ export interface Scorecard {
   seconds: number;
   utrs_per_sec: number;
   llm_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  model: string;
   usd_cost: number;
   usd_per_1k_utrs: number;
 }
@@ -49,6 +54,7 @@ export function score(
     llmCalls: number;
     inputTokens: number;
     outputTokens: number;
+    model: string;
   },
 ): Scorecard {
   const truthByUtr = new Map(truth.map((t) => [t.utr, t]));
@@ -111,6 +117,9 @@ export function score(
     seconds: meta.seconds,
     utrs_per_sec: n / Math.max(meta.seconds, 0.001),
     llm_calls: meta.llmCalls,
+    input_tokens: meta.inputTokens,
+    output_tokens: meta.outputTokens,
+    model: meta.model,
     usd_cost: usd,
     usd_per_1k_utrs: (usd / n) * 1000,
   };
@@ -213,7 +222,7 @@ export function render(s: Scorecard, decisions: Decision[]): string {
     `  ${s.source_rows} source rows across 3 systems → ${s.utrs} settlement UTRs`,
   );
   L.push(
-    `  ${s.seconds.toFixed(2)}s  ·  ${s.utrs_per_sec.toFixed(0)} UTR/s  ·  ${s.llm_calls} LLM calls  ·  $${s.usd_cost.toFixed(4)}`,
+    `  ${s.seconds.toFixed(2)}s  ·  ${s.utrs_per_sec.toFixed(0)} UTR/s  ·  ${s.llm_calls} LLM calls (${s.model})`,
   );
   L.push("");
   L.push("  ACCURACY (against generator ground truth)");
@@ -233,7 +242,8 @@ export function render(s: Scorecard, decisions: Decision[]): string {
   for (const [tier, n] of Object.entries(s.tiers).sort())
     L.push(`    ${tier.padEnd(12)} ${String(n).padStart(4)}   ${pct(n / s.utrs)}`);
   L.push(
-    `    LLM touched ${pct(s.llm_share)} of UTRs — $${s.usd_per_1k_utrs.toFixed(2)} per 1,000 UTRs at this mix`,
+    `    LLM touched ${pct(s.llm_share)} of UTRs — ${s.input_tokens.toLocaleString()} in / ${s.output_tokens.toLocaleString()} out tokens` +
+      (s.usd_cost > 0 ? `  ·  ${s.usd_cost.toFixed(4)}` : `  ·  free tier`),
   );
   L.push("");
 
