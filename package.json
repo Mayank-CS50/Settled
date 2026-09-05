@@ -1,0 +1,19 @@
+{
+  "name": "settled",
+  "version": "1.0.0",
+  "description": "AI Finance Controller — reconciles Razorpay settlements against bank credits and the merchant ledger. Deterministic netting core, LLM only on the residual.",
+  "type": "module",
+  "scripts": {
+    "generate": "node --experimental-strip-types --no-warnings src/generate.ts",
+    "start": "node --experimental-strip-types --no-warnings src/run.ts",
+    "test": "node --experimental-strip-types --no-warnings src/test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
+    "zod": "^3.25.0"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "license": "MIT"
+}

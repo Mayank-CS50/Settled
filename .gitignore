@@ -1,0 +1,6 @@
+node_modules/
+data/*.csv
+data/truth.json
+data/audit.jsonl
+data/scorecard.json
+.env
