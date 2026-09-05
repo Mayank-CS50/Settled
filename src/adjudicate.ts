@@ -91,13 +91,19 @@ function retryAfterMs(err: unknown, attempt: number): number {
  * Every other error fails through immediately: a malformed request will not fix
  * itself, and retrying it just burns quota.
  */
-async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  budget: { remainingMs: number },
+  attempts = 3,
+): Promise<T> {
   for (let i = 0; ; i++) {
     try {
       return await fn();
     } catch (err) {
-      if (i >= attempts - 1 || !isRateLimit(err)) throw err;
-      await sleep(retryAfterMs(err, i));
+      const wait = retryAfterMs(err, i);
+      if (i >= attempts - 1 || !isRateLimit(err) || wait > budget.remainingMs) throw err;
+      budget.remainingMs -= wait;
+      await sleep(wait);
     }
   }
 }
@@ -165,13 +171,32 @@ export async function adjudicate(
   let output_tokens = 0;
   let llm_calls = 0;
 
-  // Sequential on purpose: the free tier allows ~10 requests/minute, and a burst of
-  // parallel calls trips it. At single-digit residual counts there is nothing to gain
-  // from concurrency.
+  // Circuit breaker. A retry assumes the failure is transient; an exhausted daily
+  // quota is not. Without this, 7 residuals × 3 attempts × a ~60s window turned a
+  // 0.014s job into 13 minutes of waiting and still adjudicated nothing. Once the
+  // quota is clearly gone, stop asking and queue the rest immediately — the outcome
+  // is identical and the operator gets their exception list now.
+  const BREAKER_THRESHOLD = 2;
+  let consecutiveRateLimits = 0;
+  let tripped = false;
+
+  // A hard ceiling on time spent waiting for a rate-limited model, across the whole
+  // run. Past this point the exception queue is worth more to an operator than the
+  // remaining verdicts are: the unadjudicated residuals are already safely queued.
+  const budget = { remainingMs: Number(process.env.LLM_WAIT_BUDGET_MS ?? 60_000) };
+
+  // Sequential on purpose: the free tier allows a low requests-per-minute ceiling, and
+  // a burst of parallel calls trips it. At single-digit residual counts there is
+  // nothing to gain from concurrency.
   for (const n of residuals) {
+    if (tripped) {
+      decisions.push(unreviewed(n, "quota exhausted; skipped after repeated 429s"));
+      continue;
+    }
     try {
-      const res = await withRetry(() =>
-        ai.models.generateContent({
+      const res = await withRetry(
+        () =>
+          ai.models.generateContent({
           model: MODEL,
           contents: prompt(n),
           config: {
@@ -179,11 +204,13 @@ export async function adjudicate(
             responseMimeType: "application/json",
             responseSchema: RESPONSE_SCHEMA,
             temperature: 0, // a reconciliation verdict should not vary run to run
-          },
-        }),
+            },
+          }),
+        budget,
       );
 
       llm_calls++;
+      consecutiveRateLimits = 0; // a success means the window reopened
       input_tokens += res.usageMetadata?.promptTokenCount ?? 0;
       output_tokens += res.usageMetadata?.candidatesTokenCount ?? 0;
 
@@ -213,6 +240,9 @@ export async function adjudicate(
         needs_human: !trusted,
       });
     } catch (err) {
+      if (isRateLimit(err) && ++consecutiveRateLimits >= BREAKER_THRESHOLD) {
+        tripped = true;
+      }
       // Carry the real reason into the audit trail. A bare "unexpected error" once
       // hid a client-side type error here for two full runs, which read exactly like
       // a model failure — an opaque reason on a money path is its own bug.

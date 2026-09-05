@@ -142,6 +142,10 @@ Outputs land in `data/audit.jsonl` (one JSON decision per line, append-only) and
   not for a live bank export with quoted fields.
 - **One currency, one settlement cycle.** No multi-currency, no international
   settlement, no per-method rate cards.
+- **The free tier allows only 20 requests per window.** Once exhausted, a circuit
+  breaker and a 60s total wait budget (`LLM_WAIT_BUDGET_MS`) stop the pipeline from
+  waiting out retry windows item by item — unadjudicated residuals are already safely
+  queued, so the exception list is worth more than the remaining verdicts.
 - **Tier 2 runs on the Gemini free tier, where Google may use prompts and outputs to
   improve their models.** Acceptable here because every record is synthetic — there is
   no merchant data to leak. A real deployment needs a paid tier or a self-hosted model.
