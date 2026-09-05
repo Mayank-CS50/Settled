@@ -4,7 +4,7 @@
 // genuinely broken, we can report real precision/recall instead of a match
 // rate that nobody can check.
 
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type {
   BankRow,
   PaymentTruthRow,
@@ -232,6 +232,8 @@ const toCsv = (rows: Record<string, unknown>[]): string => {
 };
 
 if (import.meta.filename === process.argv[1]) {
+  // data/ is gitignored in full, so a fresh clone has no such directory.
+  mkdirSync("data", { recursive: true });
   const d = generate();
   writeFileSync("data/ledger.csv", toCsv(d.ledger as never));
   writeFileSync("data/settlements.csv", toCsv(d.settlements as never));
