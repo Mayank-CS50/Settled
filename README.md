@@ -135,9 +135,11 @@ Outputs land in `data/audit.jsonl` (one JSON decision per line, append-only) and
 - **Synthetic data.** The netting model is real, the anomaly mix is my estimate of a
   realistic distribution. Rates are hardcoded at Razorpay's standard 2% + 18% GST;
   a real merchant has a negotiated rate card per payment method.
-- **Tier 2 is currently exercised on ~7 UTRs per run, and has never run live.** The deterministic tiers are
-  good enough that little reaches it. That is the correct outcome, but it means the
-  LLM path has had less adversarial testing than the arithmetic.
+- **Tier 2 is exercised on only ~7 UTRs per run.** It has been verified live against
+  the API — all 7 residuals adjudicated correctly at 0.95-0.98 confidence, matching
+  ground truth — but the deterministic tiers are good enough that little reaches it.
+  That is the correct outcome, and it also means the LLM path has had far less
+  adversarial testing than the arithmetic.
 - **The CSV reader is a naive split** (`src/match.ts`) — fine for generated files,
   not for a live bank export with quoted fields.
 - **One currency, one settlement cycle.** No multi-currency, no international
