@@ -65,6 +65,43 @@ silently writes off real money, which is far worse than an extra item on a revie
 
 const rupees = (p: number): string => `₹${(p / 100).toFixed(2)}`;
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const isRateLimit = (err: unknown): boolean =>
+  /\b429\b|RESOURCE_EXHAUSTED|quota/i.test(
+    err instanceof Error ? err.message : String(err),
+  );
+
+/**
+ * A 429 carries a RetryInfo telling you exactly how long to wait. Honour it rather
+ * than guessing: the free tier's window is around a minute, so an invented 2s backoff
+ * just burns another request and fails again. Falls back to exponential only when the
+ * server declines to say.
+ */
+function retryAfterMs(err: unknown, attempt: number): number {
+  const m = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(
+    err instanceof Error ? err.message : String(err),
+  );
+  return m ? Math.ceil(Number(m[1]) * 1000) + 1000 : 5000 * 2 ** attempt;
+}
+
+/**
+ * Retry only on rate limits. A 429 is a "come back shortly", not a verdict — dropping
+ * a residual on the review queue because we asked too fast would be a false exception.
+ * Every other error fails through immediately: a malformed request will not fix
+ * itself, and retrying it just burns quota.
+ */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i >= attempts - 1 || !isRateLimit(err)) throw err;
+      await sleep(retryAfterMs(err, i));
+    }
+  }
+}
+
 function prompt(n: Netting): string {
   return `UTR ${n.utr}
 
@@ -133,16 +170,18 @@ export async function adjudicate(
   // from concurrency.
   for (const n of residuals) {
     try {
-      const res = await ai.models.generateContent({
-        model: MODEL,
-        contents: prompt(n),
-        config: {
-          systemInstruction: SYSTEM,
-          responseMimeType: "application/json",
-          responseSchema: RESPONSE_SCHEMA,
-          temperature: 0, // a reconciliation verdict should not vary run to run
-        },
-      });
+      const res = await withRetry(() =>
+        ai.models.generateContent({
+          model: MODEL,
+          contents: prompt(n),
+          config: {
+            systemInstruction: SYSTEM,
+            responseMimeType: "application/json",
+            responseSchema: RESPONSE_SCHEMA,
+            temperature: 0, // a reconciliation verdict should not vary run to run
+          },
+        }),
+      );
 
       llm_calls++;
       input_tokens += res.usageMetadata?.promptTokenCount ?? 0;

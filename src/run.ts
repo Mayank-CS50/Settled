@@ -25,6 +25,8 @@ const { decisions: deterministic, residuals } = matchDeterministic(
   bank,
 );
 
+const deterministicSeconds = (performance.now() - started) / 1000;
+
 console.log(
   `  Tier 0/1 resolved ${deterministic.length} UTRs · ${residuals.length} residuals escalated to Tier 2`,
 );
@@ -36,6 +38,7 @@ const seconds = (performance.now() - started) / 1000;
 const truth: TruthRow[] = JSON.parse(readFileSync("data/truth.json", "utf8"));
 const card = score(decisions, truth, {
   seconds,
+  deterministicSeconds,
   sourceRows: ledger.length + settlements.length + bank.length,
   llmCalls: run.llm_calls,
   inputTokens: run.input_tokens,

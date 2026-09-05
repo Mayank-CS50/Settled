@@ -103,6 +103,7 @@ check("only genuinely ambiguous gaps reach the LLM", () => {
 check("the deterministic tiers produce zero false positives", () => {
   const s = score(decisions, d.truth, {
     seconds: 1,
+    deterministicSeconds: 1,
     sourceRows: 0,
     llmCalls: 0,
     inputTokens: 0,

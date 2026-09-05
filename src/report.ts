@@ -36,6 +36,7 @@ export interface Scorecard {
   llm_share: number;
   needs_human: number;
   seconds: number;
+  deterministic_seconds: number;
   utrs_per_sec: number;
   llm_calls: number;
   input_tokens: number;
@@ -50,6 +51,7 @@ export function score(
   truth: TruthRow[],
   meta: {
     seconds: number;
+    deterministicSeconds: number;
     sourceRows: number;
     llmCalls: number;
     inputTokens: number;
@@ -115,7 +117,10 @@ export function score(
     llm_share: (tiers["T2_LLM"] ?? 0) / n,
     needs_human: decisions.filter((d) => d.needs_human).length,
     seconds: meta.seconds,
-    utrs_per_sec: n / Math.max(meta.seconds, 0.001),
+    deterministic_seconds: meta.deterministicSeconds,
+    // Throughput is a property of the engine, not of how long a rate-limited free
+    // tier made us wait. Both numbers are printed; neither is hidden inside the other.
+    utrs_per_sec: n / Math.max(meta.deterministicSeconds, 0.001),
     llm_calls: meta.llmCalls,
     input_tokens: meta.inputTokens,
     output_tokens: meta.outputTokens,
@@ -222,7 +227,10 @@ export function render(s: Scorecard, decisions: Decision[]): string {
     `  ${s.source_rows} source rows across 3 systems → ${s.utrs} settlement UTRs`,
   );
   L.push(
-    `  ${s.seconds.toFixed(2)}s  ·  ${s.utrs_per_sec.toFixed(0)} UTR/s  ·  ${s.llm_calls} LLM calls (${s.model})`,
+    `  ${s.deterministic_seconds.toFixed(3)}s deterministic  ·  ${s.utrs_per_sec.toLocaleString(undefined, { maximumFractionDigits: 0 })} UTR/s`,
+  );
+  L.push(
+    `  ${s.seconds.toFixed(1)}s wall clock incl. ${s.llm_calls} LLM calls (${s.model})`,
   );
   L.push("");
   L.push("  ACCURACY (against generator ground truth)");

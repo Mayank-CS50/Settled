@@ -6,3 +6,4 @@ data/audit.jsonl
 data/scorecard.json
 .env
 PROJECT_CONTEXT.md
+sample-run.txt
