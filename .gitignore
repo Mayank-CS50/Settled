@@ -4,3 +4,4 @@ data/truth.json
 data/audit.jsonl
 data/scorecard.json
 .env
+PROJECT_CONTEXT.md
